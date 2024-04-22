@@ -83,9 +83,11 @@ static void edge_count_command(int connFd, SQLiteDBInterface *sqlite, bool *loop
 static void merge_command(int connFd, SQLiteDBInterface *sqlite, bool *loop_exit_p);
 static void train_command(int connFd, SQLiteDBInterface *sqlite, bool *loop_exit_p);
 static void in_degree_command(int connFd, bool *loop_exit_p);
+static void streaming_in_degree_command(int connFd, bool *loop_exit_p);
 static void out_degree_command(int connFd, bool *loop_exit_p);
 static void page_rank_command(std::string masterIP, int connFd, SQLiteDBInterface *sqlite,
                               PerformanceSQLiteDBInterface *perfSqlite, JobScheduler *jobScheduler, bool *loop_exit_p);
+static void streaming_page_rank_command(int connFd, bool *loop_exit_p);
 static void egonet_command(int connFd, bool *loop_exit_p);
 static void duplicate_centralstore_command(int connFd, bool *loop_exit_p);
 static void predict_command(std::string masterIP, int connFd, SQLiteDBInterface *sqlite, bool *loop_exit_p);
@@ -201,10 +203,14 @@ void *frontendservicesesion(void *dummyPt) {
             train_command(connFd, sqlite, &loop_exit);
         } else if (line.compare(IN_DEGREE) == 0) {
             in_degree_command(connFd, &loop_exit);
+        } else if (line.compare(STREAMING_IN_DEGREE) == 0) {
+            streaming_in_degree_command(connFd, &loop_exit);
         } else if (line.compare(OUT_DEGREE) == 0) {
             out_degree_command(connFd, &loop_exit);
         } else if (line.compare(PAGE_RANK) == 0) {
             page_rank_command(masterIP, connFd, sqlite, perfSqlite, jobScheduler, &loop_exit);
+        } else if (line.compare(STREAMING_PAGE_RANK) == 0) {
+            streaming_page_rank_command(connFd, &loop_exit);
         } else if (line.compare(EGONET) == 0) {
             egonet_command(connFd, &loop_exit);
         } else if (line.compare(DPCNTRL) == 0) {
@@ -1901,6 +1907,47 @@ static void in_degree_command(int connFd, bool *loop_exit_p) {
     }
 }
 
+static void streaming_in_degree_command(int connFd, bool *loop_exit_p) {
+    frontend_logger.info("Calculating In Degree Distribution");
+
+    int result_wr = write(connFd, SEND.c_str(), FRONTEND_COMMAND_LENGTH);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+    result_wr = write(connFd, "\r\n", 2);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+
+    char graph_id[FRONTEND_DATA_LENGTH + 1];
+    bzero(graph_id, FRONTEND_DATA_LENGTH + 1);
+
+    read(connFd, graph_id, FRONTEND_DATA_LENGTH);
+
+    string graphID(graph_id);
+
+    graphID = Utils::trim_copy(graphID);
+    frontend_logger.info("Graph ID received: " + graphID);
+
+    JasmineGraphServer::inDegreeDistribution(graphID);
+
+    result_wr = write(connFd, DONE.c_str(), FRONTEND_COMMAND_LENGTH);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+    result_wr = write(connFd, "\r\n", 2);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+    }
+}
+
 static void out_degree_command(int connFd, bool *loop_exit_p) {
     frontend_logger.info("Calculating Out Degree Distribution");
 
@@ -2112,6 +2159,80 @@ static void page_rank_command(std::string masterIP, int connFd, SQLiteDBInterfac
     auto msDuration = std::chrono::duration_cast<std::chrono::milliseconds>(dur).count();
     frontend_logger.info("PageRank Time Taken : " + to_string(msDuration) +
                          " milliseconds");
+
+    result_wr = write(connFd, DONE.c_str(), FRONTEND_COMMAND_LENGTH);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+    result_wr = write(connFd, "\r\n", 2);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+    }
+}
+
+static void streaming_page_rank_command(int connFd, bool *loop_exit_p) {
+    frontend_logger.info("Calculating Page Rank");
+
+    int result_wr = write(connFd, SEND.c_str(), FRONTEND_COMMAND_LENGTH);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+    result_wr = write(connFd, "\r\n", 2);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+
+    char streaming_page_rank_command[FRONTEND_DATA_LENGTH + 1];
+    bzero(streaming_page_rank_command, FRONTEND_DATA_LENGTH + 1);
+    string name = "";
+    string path = "";
+
+    read(connFd, streaming_page_rank_command, FRONTEND_DATA_LENGTH);
+    std::vector<std::string> strArr = Utils::split(streaming_page_rank_command, '|');
+
+    string graphID;
+    graphID = strArr[0];
+    double alpha = PAGE_RANK_ALPHA;
+    if (strArr.size() > 1) {
+        alpha = std::stod(strArr[1]);
+        if (alpha < 0 || alpha >= 1) {
+            frontend_logger.error("Invalid value for alpha");
+            result_wr = write(connFd, INVALID_FORMAT.c_str(), INVALID_FORMAT.size());
+            if (result_wr < 0) {
+                frontend_logger.error("Error writing to socket");
+                *loop_exit_p = true;
+            }
+            return;
+        }
+    }
+
+    int iterations = PAGE_RANK_ITERATIONS;
+    if (strArr.size() > 2) {
+        iterations = std::stod(strArr[2]);
+        if (iterations <= 0 || iterations >= 100) {
+            frontend_logger.error("Invalid value for iterations");
+            result_wr = write(connFd, INVALID_FORMAT.c_str(), INVALID_FORMAT.size());
+            if (result_wr < 0) {
+                frontend_logger.error("Error writing to socket");
+                *loop_exit_p = true;
+            }
+            return;
+        }
+    }
+
+    graphID = Utils::trim_copy(graphID, " \f\n\r\t\v");
+    frontend_logger.info("Graph ID received: " + graphID);
+    frontend_logger.info("Alpha value: " + to_string(alpha));
+    frontend_logger.info("Iterations value: " + to_string(iterations));
+
+    JasmineGraphServer::strPageRank(graphID, alpha, iterations);
 
     result_wr = write(connFd, DONE.c_str(), FRONTEND_COMMAND_LENGTH);
     if (result_wr < 0) {

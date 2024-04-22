@@ -75,6 +75,15 @@ map<long, long> calculateLocalInDegreeDist(
     string graphID, string partitionID, std::map<std::string, JasmineGraphHashMapLocalStore> graphDBMapLocalStores,
     std::map<std::string, JasmineGraphHashMapCentralStore> graphDBMapCentralStores);
 
+map<long, long> calculateStrInDegreeDist(string graphID, string partitionID, int serverPort,
+                                      std::map<std::string, JasmineGraphHashMapLocalStore> graphDBMapLocalStores,
+                                      std::map<std::string, JasmineGraphHashMapCentralStore> graphDBMapCentralStores,
+                                      std::vector<string> workerSockets, string workerList);
+
+map<long, long> calculateLocalStrInDegreeDist(
+    string graphID, string partitionID, std::map<std::string, JasmineGraphHashMapLocalStore> graphDBMapLocalStores,
+    std::map<std::string, JasmineGraphHashMapCentralStore> graphDBMapCentralStores);
+
 map<long, map<long, unordered_set<long>>> calculateLocalEgoNet(string graphID, string partitionID, int serverPort,
                                                                JasmineGraphHashMapLocalStore localDB,
                                                                JasmineGraphHashMapCentralStore centralDB,
@@ -88,6 +97,11 @@ map<long, double> calculateLocalPageRank(string graphID, double alpha, string pa
                                          JasmineGraphHashMapLocalStore localDB,
                                          JasmineGraphHashMapCentralStore centralDB, std::vector<string> workerSockets,
                                          int iterations);
+
+map<long, double> calculateLocalStrPageRank(string graphID, double alpha, string partitionID, int serverPort,
+                                         int top_k_page_rank_value,
+                                         std::vector<string> workerSockets,
+                                         int iterations, std::map<std::string, JasmineGraphIncrementalLocalStore *> &incrementalLocalStoreMap);
 
 map<long, double> getAuthorityScoresWorldToLocal(string graphID, string partitionID, int serverPort,
                                                  string graphVertexCount, JasmineGraphHashMapLocalStore localDB,

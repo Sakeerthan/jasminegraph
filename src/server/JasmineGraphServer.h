@@ -146,11 +146,15 @@ class JasmineGraphServer {
 
     static void inDegreeDistribution(std::string graphID);
 
+    static void strInDegreeDistribution(std::string graphID);
+
     static void outDegreeDistribution(std::string graphID);
 
     static void duplicateCentralStore(std::string graphID);
 
     static void pageRank(std::string graphID, double alpha, int iterations);
+
+    static void strPageRank(std::string graphID, double alpha, int iterations);
 
     static long getGraphVertexCount(std::string graphID);
 

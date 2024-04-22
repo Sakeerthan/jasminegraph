@@ -23,6 +23,7 @@ Logger incremental_localstore_logger;
 
 JasmineGraphIncrementalLocalStore::JasmineGraphIncrementalLocalStore(unsigned int graphID, unsigned int partitionID,
                                                                      std::string openMode) {
+    this->partitionID = partitionID;
     gc.graphID = graphID;
     gc.partitionID = partitionID;
     gc.maxLabelSize = 43;   // TODO tmkasun: read from .properties file
@@ -53,13 +54,15 @@ void JasmineGraphIncrementalLocalStore::addEdgeFromString(std::string edgeString
         auto destinationJson = edgeJson["destination"];
 
         std::string sId = std::string(sourceJson["id"]);
+        unsigned int sPId = sourceJson["pid"].get<unsigned int>();
         std::string dId = std::string(destinationJson["id"]);
+        unsigned int dPId = destinationJson["pid"].get<unsigned int>();
 
         RelationBlock* newRelation;
         if (edgeJson["EdgeType"] == "Central") {
-            newRelation = this->nm->addCentralEdge({sId, dId});
+            newRelation = this->nm->addCentralEdge(sId, sPId, dId, dPId);
         } else {
-            newRelation = this->nm->addLocalEdge({sId, dId});
+            newRelation = this->nm->addLocalEdge(sId, sPId, dId, dPId);
         }
         if (!newRelation) {
             return;
