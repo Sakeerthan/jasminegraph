@@ -89,6 +89,11 @@ map<long, double> calculateLocalPageRank(string graphID, double alpha, string pa
                                          JasmineGraphHashMapCentralStore centralDB, std::vector<string> workerSockets,
                                          int iterations);
 
+map<long, double> calculateLocalStrPageRank(string graphID, double alpha, string partitionID, int serverPort,
+                                         int top_k_page_rank_value,
+                                         std::vector<string> workerSockets,
+                                         int iterations, std::map<std::string, JasmineGraphIncrementalLocalStore *> &incrementalLocalStoreMap);
+
 map<long, double> getAuthorityScoresWorldToLocal(string graphID, string partitionID, int serverPort,
                                                  string graphVertexCount, JasmineGraphHashMapLocalStore localDB,
                                                  JasmineGraphHashMapCentralStore centralDB,

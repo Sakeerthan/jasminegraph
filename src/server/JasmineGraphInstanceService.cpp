@@ -76,6 +76,9 @@ static void out_degree_distribution_command(
 static void page_rank_command(int connFd, int serverPort,
                               std::map<std::string, JasmineGraphHashMapCentralStore> graphDBMapCentralStores,
                               bool *loop_exit_p);
+static void str_page_rank_command(int connFd, int serverPort,
+                              std::map<std::string, JasmineGraphIncrementalLocalStore *> &incrementalLocalStoreMap,
+                              bool *loop_exit_p);
 static void worker_page_rank_distribution_command(
     int connFd, int serverPort, std::map<std::string, JasmineGraphHashMapCentralStore> graphDBMapCentralStores,
     bool *loop_exit_p);
@@ -202,6 +205,8 @@ void *instanceservicesession(void *dummyPt) {
                                             &loop_exit);
         } else if (line.compare(JasmineGraphInstanceProtocol::PAGE_RANK) == 0) {
             page_rank_command(connFd, serverPort, graphDBMapCentralStores, &loop_exit);
+        } else if (line.compare(JasmineGraphInstanceProtocol::STR_PAGE_RANK) == 0) {
+            str_page_rank_command(connFd, serverPort, incrementalLocalStoreMap, &loop_exit);
         } else if (line.compare(JasmineGraphInstanceProtocol::WORKER_PAGE_RANK_DISTRIBUTION) == 0) {
             worker_page_rank_distribution_command(connFd, serverPort, graphDBMapCentralStores, &loop_exit);
         } else if (line.compare(JasmineGraphInstanceProtocol::EGONET) == 0) {
@@ -1821,6 +1826,146 @@ map<long, double> calculateLocalPageRank(string graphID, double alpha, string pa
     return finalPageRankResults;
 }
 
+map<long, double> calculateLocalStrPageRank(string graphID, double alpha, string partitionID, int serverPort,
+                                         int top_k_page_rank_value,
+                                         std::vector<string> workerSockets,
+                                         int iterations, std::map<std::string, JasmineGraphIncrementalLocalStore *> &incrementalLocalStoreMap) {
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    JasmineGraphIncrementalLocalStore *incrementalLocalStoreInstance = JasmineGraphInstanceService::loadStreamingStore(
+        graphID, partitionID, incrementalLocalStoreMap, "app");
+    NodeManager* nm = incrementalLocalStoreInstance->nm;
+    long graphVertexCountLong = nm->getGraphVertexCount();
+    string graphVertexCount = std::to_string(graphVertexCountLong);
+    //map<long, unordered_set<long>> centralGraphMap = nm->getCentralAdjacencyList();//native store
+    map<long, unordered_set<long>> localGraphMap = nm->getPageRankAdjacencyList();
+    map<long, unordered_set<long>>::iterator localGraphMapIterator;
+    // map<long, unordered_set<long>>::iterator centralGraphMapIterator;
+
+    std::vector<long> vertexVector;
+    for (localGraphMapIterator = localGraphMap.begin(); localGraphMapIterator != localGraphMap.end();
+         ++localGraphMapIterator) {
+        long startVid = localGraphMapIterator->first;
+        unordered_set<long> endVidSet = localGraphMapIterator->second;
+
+        for (auto itr = endVidSet.begin(); itr != endVidSet.end(); ++itr) {
+            if (localGraphMap.find(*itr) == localGraphMap.end()) {
+                unordered_set<long> valueSet;
+                localGraphMap.insert(std::make_pair(*itr, valueSet));
+            }
+        }
+    }
+
+    long partitionVertexCount = localGraphMap.size();
+    long worldOnlyVertexCount = atol(graphVertexCount.c_str()) - partitionVertexCount;
+
+    double damp = 1 - alpha;
+    int M = partitionVertexCount + 1;
+
+    long adjacencyIndex[M];
+    int counter = 0;
+
+    for (localGraphMapIterator = localGraphMap.begin(); localGraphMapIterator != localGraphMap.end();
+         ++localGraphMapIterator) {
+        long startVid = localGraphMapIterator->first;
+
+        adjacencyIndex[counter] = startVid;
+        counter++;
+    }
+
+    adjacencyIndex[partitionVertexCount] = -1;
+
+    long entireGraphSize = atol(graphVertexCount.c_str());
+    float mu = damp / entireGraphSize;
+    unordered_map<float, float> resultTreeMap;
+    // calculating local pagerank
+    map<long, double> rankMap;
+
+    std::map<long, long> inDegreeDistribution = nm->getInDistributionMap();
+
+    // string instanceDataFolderLocation = Utils::getJasmineGraphProperty("org.jasminegraph.server.instance.datafolder");
+    // string attributeFilePart = instanceDataFolderLocation + "/0_idd" + partitionID; //change
+    // ofstream partfile;
+    // partfile.open(attributeFilePart, std::fstream::trunc);
+    // for (map<long, long>::iterator it = inDegreeDistribution.begin(); it != inDegreeDistribution.end(); ++it) {
+    //     partfile << to_string(it->first) << "\t" << to_string(it->second) << endl;
+    // }
+    // partfile.close();
+
+    for (localGraphMapIterator = localGraphMap.begin(); localGraphMapIterator != localGraphMap.end();
+         ++localGraphMapIterator) {
+        auto inDegreeDistributionItr = inDegreeDistribution.find(localGraphMapIterator->first);
+
+        if (inDegreeDistributionItr != inDegreeDistribution.end()) {
+            long inDegree = inDegreeDistributionItr->second;
+            double authorityScore = (alpha * 1 + mu) * inDegree;
+            rankMap.insert(std::make_pair(inDegreeDistributionItr->first, authorityScore));
+        }
+    }
+
+    int count = 0;
+    while (count < iterations) {
+        for (localGraphMapIterator = localGraphMap.begin(); localGraphMapIterator != localGraphMap.end();
+             ++localGraphMapIterator) {
+            long startVid = localGraphMapIterator->first;
+            unordered_set<long> endVidSet = localGraphMapIterator->second;
+            double existingParentRank = 1;
+
+            auto rankMapItr = rankMap.find(startVid);
+            if (rankMapItr != rankMap.end()) {
+                existingParentRank = rankMapItr->second;
+            } else {
+                rankMap.insert(std::make_pair(startVid, existingParentRank));
+            }
+
+            long degree = endVidSet.size();
+            double distributedRank = alpha * (existingParentRank / degree) + mu;
+
+            for (long itr : endVidSet) {
+                auto rankMapItr = rankMap.find(itr);
+
+                double existingChildRank = 0;
+                double finalRank = 0;
+                if (rankMapItr != rankMap.end()) {
+                    existingChildRank = rankMapItr->second;
+                    finalRank = existingChildRank + distributedRank;
+
+                    rankMapItr->second = finalRank;
+                } else {
+                    finalRank = existingChildRank + distributedRank;
+                    rankMap.insert(std::make_pair(itr, finalRank));
+                }
+            }
+        }
+
+        count++;
+    }
+
+    map<double, long> rankMapResults;
+    map<long, double> finalPageRankResults;
+    if (top_k_page_rank_value == -1) {
+        instance_logger.info("PageRank is not implemented");
+    } else {
+        int count = 0;
+        for (map<long, double>::iterator rankMapItr = rankMap.begin(); rankMapItr != rankMap.end(); ++rankMapItr) {
+            finalPageRankResults.insert(std::make_pair(rankMapItr->first, rankMapItr->second));
+            count++;
+        }
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double elapsed_time_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+    // centralGraphMap.clear();
+    localGraphMap.clear();
+    resultTreeMap.clear();
+    inDegreeDistribution.clear();
+    rankMap.clear();
+    rankMapResults.clear();
+    instance_logger.info("Elapsed time for calculating PageRank (in ms) -----: " + to_string(elapsed_time_ms));
+    return finalPageRankResults;
+}
+
 map<long, unordered_set<long>> getEdgesWorldToLocal(string graphID, string partitionID, int serverPort,
                                                     string graphVertexCount, JasmineGraphHashMapLocalStore localDB,
                                                     JasmineGraphHashMapCentralStore centralDB,
@@ -2652,6 +2797,147 @@ static void page_rank_command(int connFd, int serverPort,
     instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
 
     instance_logger.info("Finish : Calculate Local PageRank.");
+}
+
+static void str_page_rank_command(int connFd, int serverPort,
+                              std::map<std::string, JasmineGraphIncrementalLocalStore *> &incrementalLocalStoreMap,
+                              bool *loop_exit_p) {
+    if (!Utils::send_str_wrapper(connFd, JasmineGraphInstanceProtocol::OK)) {
+        *loop_exit_p = true;
+        return;
+    }
+    instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
+
+
+
+    char data[DATA_BUFFER_SIZE];
+    string graphID = Utils::read_str_trim_wrapper(connFd, data, INSTANCE_DATA_LENGTH);
+    instance_logger.log("Received Graph ID: " + graphID, "info");
+
+    if (!Utils::send_str_wrapper(connFd, JasmineGraphInstanceProtocol::OK)) {
+        *loop_exit_p = true;
+        return;
+    }
+    instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
+
+    string partitionID = Utils::read_str_trim_wrapper(connFd, data, INSTANCE_DATA_LENGTH);
+    instance_logger.log("Received Partition ID: " + partitionID, "info");
+
+    if (!Utils::send_str_wrapper(connFd, JasmineGraphInstanceProtocol::OK)) {
+        *loop_exit_p = true;
+        return;
+    }
+    instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
+
+    string workerList = Utils::read_str_trim_wrapper(connFd, data, INSTANCE_DATA_LENGTH);
+    instance_logger.log("Received Worker List " + workerList, "info");
+
+    std::vector<string> workerSockets;
+    stringstream wl(workerList);
+    string intermediate;
+    while (getline(wl, intermediate, ',')) {
+        workerSockets.push_back(intermediate);
+    }
+
+    if (!Utils::send_str_wrapper(connFd, JasmineGraphInstanceProtocol::OK)) {
+        *loop_exit_p = true;
+        return;
+    }
+    instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
+
+    // string graphVertexCount = Utils::read_str_trim_wrapper(connFd, data, INSTANCE_DATA_LENGTH);
+    // instance_logger.log("Received Graph ID:" + graphID + " Vertex Count: " + graphVertexCount, "info");
+
+    // if (!Utils::send_str_wrapper(connFd, JasmineGraphInstanceProtocol::OK)) {
+    //     *loop_exit_p = true;
+    //     return;
+    // }
+    // instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
+
+    string alphaValue = Utils::read_str_trim_wrapper(connFd, data, INSTANCE_DATA_LENGTH);
+    instance_logger.log("Received alpha: " + alphaValue, "info");
+
+    double alpha = std::stod(alphaValue);
+
+    if (!Utils::send_str_wrapper(connFd, JasmineGraphInstanceProtocol::OK)) {
+        *loop_exit_p = true;
+        return;
+    }
+    instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
+
+    string iterationsValue = Utils::read_str_trim_wrapper(connFd, data, INSTANCE_DATA_LENGTH);
+    instance_logger.log("Received iteration count: " + iterationsValue, "info");
+
+    int iterations = stoi(iterationsValue);
+
+    if (!Utils::send_str_wrapper(connFd, JasmineGraphInstanceProtocol::OK)) {
+        *loop_exit_p = true;
+        return;
+    }
+    instance_logger.log("Sent : " + JasmineGraphInstanceProtocol::OK, "info");
+
+    std::map<std::string, JasmineGraphHashMapLocalStore> graphDBMapLocalStoresPgrnk;
+    if (JasmineGraphInstanceService::isGraphDBExists(graphID, partitionID)) {
+        JasmineGraphInstanceService::loadLocalStore(graphID, partitionID, graphDBMapLocalStoresPgrnk);
+    }
+
+    instance_logger.log("Start : Calculate Local page rank", "info");
+
+    map<long, double> pageRankResults =
+        calculateLocalStrPageRank(graphID, alpha, partitionID, serverPort, TOP_K_PAGE_RANK, 
+                               workerSockets, iterations, incrementalLocalStoreMap);
+    instance_logger.log("PageRank size: " + to_string(pageRankResults.size()), "info");
+
+    JasmineGraphIncrementalLocalStore *incrementalLocalStoreInstance = JasmineGraphInstanceService::loadStreamingStore(
+        graphID, partitionID, incrementalLocalStoreMap, "app");
+    NodeManager* nm = incrementalLocalStoreInstance->nm;
+
+    map<long, double> pageRankLocalstore;
+    map<long, unordered_set<long>> localGraphMap = nm->getPageRankAdjacencyList();
+    map<long, unordered_set<long>>::iterator localGraphMapIterator;
+    std::vector<long> vertexVector;
+    for (localGraphMapIterator = localGraphMap.begin(); localGraphMapIterator != localGraphMap.end();
+         ++localGraphMapIterator) {
+        long startVid = localGraphMapIterator->first;
+        unordered_set<long> endVidSet = localGraphMapIterator->second;
+
+        map<long, double>::iterator pageRankValue = pageRankResults.find(startVid);
+        if (pageRankValue == pageRankResults.end()) {
+            pageRankLocalstore.insert(std::make_pair(startVid, 0.0));
+        } else {
+            double value = pageRankValue->second;
+            pageRankLocalstore.insert(std::make_pair(startVid, value));
+        }
+
+        for (auto a = endVidSet.begin(); a != endVidSet.end(); ++a) {
+            long endVid = *a;
+            map<long, double>::iterator pageRankValue = pageRankResults.find(endVid);
+            if (pageRankLocalstore.find(endVid) == pageRankLocalstore.end()) {
+                if (pageRankValue == pageRankResults.end()) {
+                    pageRankLocalstore.insert(std::make_pair(endVid, 0.0));
+                } else {
+                    double value = pageRankValue->second;
+                    pageRankLocalstore.insert(std::make_pair(endVid, value));
+                }
+            }
+        }
+    }
+
+    string instanceDataFolderLocation = Utils::getJasmineGraphProperty("org.jasminegraph.server.instance.datafolder");
+    string attributeFilePart = instanceDataFolderLocation + "/" + graphID + "_strpgrnk_" + partitionID;
+    ofstream partfile;
+    partfile.open(attributeFilePart, std::fstream::trunc);
+    for (map<long, double>::iterator it = pageRankLocalstore.begin(); it != pageRankLocalstore.end(); ++it) {
+        partfile << to_string(it->first) << "\t" << to_string(it->second) << endl;
+    }
+    partfile.close();
+
+    *loop_exit_p = true;
+    pageRankResults.clear();
+    localGraphMap.clear();
+    pageRankLocalstore.clear();
+    graphDBMapLocalStoresPgrnk.clear();
+    instance_logger.log("Finish : Calculate Local page rank.", "info");
 }
 
 static void worker_page_rank_distribution_command(
