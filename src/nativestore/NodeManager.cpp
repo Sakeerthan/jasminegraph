@@ -53,24 +53,19 @@ NodeManager::NodeManager(GraphConfig gConfig) {
 
     if (gConfig.maxLabelSize) {
         setIndexKeySize(gConfig.maxLabelSize);
-    }
-
-    if (gConfig.maxLabelSize) {
         node_manager_logger.info("Setting index key size to: " + std::to_string(gConfig.maxLabelSize));
+
     }
 
     std::ios_base::openmode openMode = std::ios::in | std::ios::out;  // Default mode
     if (gConfig.openMode == NodeManager::FILE_MODE) {
         this->nodeIndex = readNodeIndex();
-    } else {
-        openMode |= std::ios::trunc;
-    }
-
-    if (gConfig.openMode == NodeManager::FILE_MODE) {
         node_manager_logger.info("Using APPEND mode for file operations.");
     } else {
+        openMode |= std::ios::trunc;
         node_manager_logger.info("Using TRUNC mode for file operations.");
     }
+
 
     NodeBlock::nodesDB = Utils::openFile(nodesDBPath, openMode);
     PropertyLink::propertiesDB = Utils::openFile(propertiesDBPath, openMode);
@@ -245,11 +240,15 @@ NodeBlock *NodeManager::addNode(std::string nodeId) {
     return this->get(nodeId);
 }
 
-RelationBlock *NodeManager::addLocalEdge(std::pair<std::string, std::string> edge) {
+RelationBlock *NodeManager::addLocalEdge(std::pair<std::string, std::string> edge, std::pair<unsigned int, unsigned int> pid_pair) {
     pthread_mutex_lock(&lockEdgeAdd);
 
     NodeBlock *sourceNode = this->addNode(edge.first);
     NodeBlock *destNode = this->addNode(edge.second);
+    if(sourceNode && destNode){
+        sourceNode->setPartitionId(pid_pair.first);
+        destNode->setPartitionId(pid_pair.second);
+    }
     RelationBlock *newRelation = this->addLocalRelation(*sourceNode, *destNode);
     if (newRelation) {
         newRelation->setDestination(destNode);
@@ -262,7 +261,7 @@ RelationBlock *NodeManager::addLocalEdge(std::pair<std::string, std::string> edg
     return newRelation;
 }
 
-RelationBlock *NodeManager::addCentralEdge(std::pair<std::string, std::string> edge) {
+RelationBlock *NodeManager::addCentralEdge(std::pair<std::string, std::string> edge, std::pair<unsigned int, unsigned int> pid_pair) {
     //    std::unique_lock<std::mutex> guard1(lockCentralEdgeAdd);
     //
     //    guard1.lock();
@@ -270,6 +269,10 @@ RelationBlock *NodeManager::addCentralEdge(std::pair<std::string, std::string> e
 
     NodeBlock *sourceNode = this->addNode(edge.first);
     NodeBlock *destNode = this->addNode(edge.second);
+    if(sourceNode && destNode){
+        sourceNode->setPartitionId(pid_pair.first);
+        destNode->setPartitionId(pid_pair.second);
+    }
     RelationBlock *newRelation = this->addCentralRelation(*sourceNode, *destNode);
     if (newRelation) {
         newRelation->setDestination(destNode);
@@ -483,6 +486,83 @@ std::map<long, std::unordered_set<long>> NodeManager::getAdjacencyList() {
     return adjacencyList;
 }
 
+// Get PageRank Adjacency list for the graph
+std::map<long, std::unordered_set<long>> NodeManager::getPageRankAdjacencyList() {
+    map<long, std::unordered_set<long>> adjacencyList;
+    for (auto it : this->nodeIndex) {
+        auto nodeId = it.first;
+        NodeBlock *node = this->get(nodeId);
+        // if (node->partitionId == getPartitionID()) {
+            std::unordered_set<long> neighbors;
+            std::list<NodeBlock*> neighborNodes = node->getAllEdgeNodes();
+
+            for (auto neighborNode : neighborNodes) {
+                neighbors.insert(neighborNode->nodeId);
+            }
+            adjacencyList.emplace((long)node->nodeId, neighbors);
+        // }   
+    }
+
+    return adjacencyList;
+}
+
+// Get adjacency list for the graph
+// std::map<long, std::unordered_set<long>> NodeManager::getLocalAdjacencyList() {
+//     map<long, std::unordered_set<long>> adjacencyList;
+//     for (auto it : this->nodeIndex) {
+//         auto nodeId = it.first;
+//         NodeBlock *node = this->get(nodeId);
+//         std::unordered_set<long> neighbors;
+//         std::list<NodeBlock*> neighborNodes = node->getAllEdgeNodes();
+
+//         for (auto neighborNode : neighborNodes) {
+//             neighbors.insert(neighborNode->nodeId);
+//         }
+//         if (node->getLocalRelationHead()) {
+//             adjacencyList.emplace((long)node->nodeId, neighbors);
+//         }
+//     }
+
+//     return adjacencyList;
+// }
+
+std::map<long, std::unordered_set<long>> NodeManager::getLocalAdjacencyList() {
+    std::map<long, std::unordered_set<long>> adjacencyList;
+
+    int relationBlockSize = RelationBlock::BLOCK_SIZE;
+
+    long new_relation_count = dbSize(dbPrefix + "_relations.db") / relationBlockSize - 1;
+
+    for (int i = 1; i <= new_relation_count ; i++) {
+        RelationBlock* relationBlock = RelationBlock::getLocalRelation(i * relationBlockSize);
+        long src = std::stol(relationBlock->getSource()->id);
+        long dest = std::stol(relationBlock->getDestination()->id);
+
+        // Insert into adjacency list
+        adjacencyList[src].insert(dest);
+        //adjacencyList[dest].insert(src);
+    }
+    return adjacencyList;
+}
+
+// std::map<long, std::unordered_set<long>> NodeManager::getPageRankAdjacencyList() {
+//     std::map<long, std::unordered_set<long>> adjacencyList = getLocalAdjacencyList();
+
+//     int relationBlockSize = RelationBlock::BLOCK_SIZE;
+
+//     long new_relation_count = dbSize(dbPrefix + "_central_relations.db") / relationBlockSize - 1;
+
+//     for (int i = 1; i <= new_relation_count ; i++) {
+//         RelationBlock* relationBlock = RelationBlock::getCentralRelation(i * relationBlockSize);
+//         long src = std::stol(relationBlock->getSource()->id);
+//         long dest = std::stol(relationBlock->getDestination()->id);
+
+//         // Insert into adjacency list
+//         adjacencyList[src].insert(dest);
+//     }
+//     return adjacencyList;
+// }
+
 std::map<long, std::unordered_set<long>> NodeManager::getAdjacencyList(bool isLocal) {
     std::map<long, std::unordered_set<long>> adjacencyList;
 
@@ -521,6 +601,48 @@ std::map<long, long> NodeManager::getDistributionMap() {
     }
 
     return distributionMap;
+}
+
+// Get indegree map
+std::map<long, long> NodeManager::getInDistributionMap() {
+    std::map<long, std::unordered_set<long>> adjacencyList = getLocalAdjacencyList();
+
+    int relationBlockSize = RelationBlock::BLOCK_SIZE;
+
+    long new_relation_count = dbSize(dbPrefix + "_central_relations.db") / relationBlockSize - 1;
+
+    for (int i = 1; i <= new_relation_count ; i++) {
+        RelationBlock* relationBlock = RelationBlock::getCentralRelation(i * relationBlockSize);
+        long src = std::stol(relationBlock->getSource()->id);
+        long dest = std::stol(relationBlock->getDestination()->id);
+
+        // Insert into adjacency list
+        adjacencyList[src].insert(dest);
+    }
+
+
+    std::map<long, long> distributionMap;
+
+    for (map<long, unordered_set<long>>::iterator it = adjacencyList.begin(); it != adjacencyList.end();
+         ++it) {
+        unordered_set<long> distribution = it->second;
+
+        for (auto itr = distribution.begin(); itr != distribution.end(); ++itr) {
+            std::map<long, long>::iterator distMapItr = distributionMap.find(*itr);
+            if (distMapItr != distributionMap.end()) {
+                long previousValue = distMapItr->second;
+                distMapItr->second = previousValue + 1;
+            } else {
+                distributionMap.insert(std::make_pair(*itr, 1));
+            }
+        }
+    }
+
+    return distributionMap;
+}
+
+long NodeManager::getGraphVertexCount() {
+    return this->nodeIndex.size();
 }
 
 /**

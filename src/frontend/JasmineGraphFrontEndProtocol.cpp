@@ -36,6 +36,7 @@ const string SEND_MODE = "mode-send";
 const string VCOUNT = "vcnt";
 const string ECOUNT = "ecnt";
 const string PAGE_RANK = "pgrnk";
+const string STREAMING_PAGE_RANK = "spgrnk";
 const string OUT_DEGREE_DISTRIBUTION = "odd";
 const string IN_DEGREE = "idd";
 const string OUT_DEGREE = "odd";

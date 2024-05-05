@@ -86,6 +86,7 @@ static void in_degree_command(int connFd, bool *loop_exit_p);
 static void out_degree_command(int connFd, bool *loop_exit_p);
 static void page_rank_command(std::string masterIP, int connFd, SQLiteDBInterface *sqlite,
                               PerformanceSQLiteDBInterface *perfSqlite, JobScheduler *jobScheduler, bool *loop_exit_p);
+static void streaming_page_rank_command(int connFd, bool *loop_exit_p);
 static void egonet_command(int connFd, bool *loop_exit_p);
 static void duplicate_centralstore_command(int connFd, bool *loop_exit_p);
 static void predict_command(std::string masterIP, int connFd, SQLiteDBInterface *sqlite, bool *loop_exit_p);
@@ -116,7 +117,7 @@ void *frontendservicesesion(void *dummyPt) {
     std::string kafka_server_IP;
     cppkafka::Configuration configs;
     KafkaConnector *kstream;
-    Partitioner graphPartitioner(numberOfPartitions, 1, spt::Algorithms::HASH);
+    Partitioner graphPartitioner(numberOfPartitions, 1, spt::Algorithms::LDG);
 
     for (int i = 0; i < workerList.size(); i++) {
         Utils::worker currentWorker = workerList.at(i);
@@ -205,6 +206,8 @@ void *frontendservicesesion(void *dummyPt) {
             out_degree_command(connFd, &loop_exit);
         } else if (line.compare(PAGE_RANK) == 0) {
             page_rank_command(masterIP, connFd, sqlite, perfSqlite, jobScheduler, &loop_exit);
+        } else if (line.compare(STREAMING_PAGE_RANK) == 0) {
+            streaming_page_rank_command(connFd, &loop_exit);
         } else if (line.compare(EGONET) == 0) {
             egonet_command(connFd, &loop_exit);
         } else if (line.compare(DPCNTRL) == 0) {
@@ -1220,7 +1223,7 @@ static void add_stream_kafka_command(int connFd, std::string &kafka_server_IP, c
     // create kafka consumer and graph partitioner
     kstream = new KafkaConnector(configs);
 // Create the Partitioner object.
-    Partitioner graphPartitioner(numberOfPartitions, 0, spt::Algorithms::FENNEL);
+    Partitioner graphPartitioner(numberOfPartitions, 0, spt::Algorithms::LDG);
 // Create the KafkaConnector object.
     kstream = new KafkaConnector(configs);
     // Subscribe to the Kafka topic.
@@ -2112,6 +2115,80 @@ static void page_rank_command(std::string masterIP, int connFd, SQLiteDBInterfac
     auto msDuration = std::chrono::duration_cast<std::chrono::milliseconds>(dur).count();
     frontend_logger.info("PageRank Time Taken : " + to_string(msDuration) +
                          " milliseconds");
+
+    result_wr = write(connFd, DONE.c_str(), FRONTEND_COMMAND_LENGTH);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+    result_wr = write(connFd, "\r\n", 2);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+    }
+}
+
+static void streaming_page_rank_command(int connFd, bool *loop_exit_p) {
+    frontend_logger.info("Calculating Page Rank");
+
+    int result_wr = write(connFd, SEND.c_str(), FRONTEND_COMMAND_LENGTH);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+    result_wr = write(connFd, "\r\n", 2);
+    if (result_wr < 0) {
+        frontend_logger.error("Error writing to socket");
+        *loop_exit_p = true;
+        return;
+    }
+
+    char streaming_page_rank_command[FRONTEND_DATA_LENGTH + 1];
+    bzero(streaming_page_rank_command, FRONTEND_DATA_LENGTH + 1);
+    string name = "";
+    string path = "";
+
+    read(connFd, streaming_page_rank_command, FRONTEND_DATA_LENGTH);
+    std::vector<std::string> strArr = Utils::split(streaming_page_rank_command, '|');
+
+    string graphID;
+    graphID = strArr[0];
+    double alpha = PAGE_RANK_ALPHA;
+    if (strArr.size() > 1) {
+        alpha = std::stod(strArr[1]);
+        if (alpha < 0 || alpha >= 1) {
+            frontend_logger.error("Invalid value for alpha");
+            result_wr = write(connFd, INVALID_FORMAT.c_str(), INVALID_FORMAT.size());
+            if (result_wr < 0) {
+                frontend_logger.error("Error writing to socket");
+                *loop_exit_p = true;
+            }
+            return;
+        }
+    }
+
+    int iterations = PAGE_RANK_ITERATIONS;
+    if (strArr.size() > 2) {
+        iterations = std::stod(strArr[2]);
+        if (iterations <= 0 || iterations >= 100) {
+            frontend_logger.error("Invalid value for iterations");
+            result_wr = write(connFd, INVALID_FORMAT.c_str(), INVALID_FORMAT.size());
+            if (result_wr < 0) {
+                frontend_logger.error("Error writing to socket");
+                *loop_exit_p = true;
+            }
+            return;
+        }
+    }
+
+    graphID = Utils::trim_copy(graphID, " \f\n\r\t\v");
+    frontend_logger.info("Graph ID received: " + graphID);
+    frontend_logger.info("Alpha value: " + to_string(alpha));
+    frontend_logger.info("Iterations value: " + to_string(iterations));
+
+    JasmineGraphServer::strPageRank(graphID, alpha, iterations);
 
     result_wr = write(connFd, DONE.c_str(), FRONTEND_COMMAND_LENGTH);
     if (result_wr < 0) {

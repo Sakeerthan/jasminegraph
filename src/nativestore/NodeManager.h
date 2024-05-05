@@ -57,8 +57,8 @@ class NodeManager {
     std::string getDbPrefix();
     void close();
 
-    RelationBlock* addLocalEdge(std::pair<std::string, std::string>);
-    RelationBlock* addCentralEdge(std::pair<std::string, std::string> edge);
+    RelationBlock* addLocalEdge(std::pair<std::string, std::string> edge, std::pair<unsigned int, unsigned int> pid_pair);
+    RelationBlock* addCentralEdge(std::pair<std::string, std::string> edge, std::pair<unsigned int, unsigned int> pid_pair);
 
     RelationBlock* addLocalRelation(NodeBlock, NodeBlock);
     RelationBlock* addCentralRelation(NodeBlock source, NodeBlock destination);
@@ -71,8 +71,12 @@ class NodeManager {
     std::list<NodeBlock*> getGraph();
 
     std::map<long, std::unordered_set<long>> getAdjacencyList();
+    std::map<long, std::unordered_set<long>> getLocalAdjacencyList();
+    std::map<long, std::unordered_set<long>> getPageRankAdjacencyList();
     std::map<long, std::unordered_set<long>> getAdjacencyList(bool isLocal);
     std::map<long, long> getDistributionMap();
+    std::map<long, long> getInDistributionMap(); 
+    long getGraphVertexCount();
 };
 
 #endif
